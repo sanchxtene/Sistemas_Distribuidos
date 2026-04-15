@@ -2,7 +2,7 @@ import sys
 import socket
 from processamento_manual import teste_manual
 from processamento_automatico import teste_arquivo
-from conectar import conectar_com_servidor
+from conexao import conectar_com_servidor
 
 
 

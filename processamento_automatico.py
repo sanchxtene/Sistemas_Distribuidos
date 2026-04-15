@@ -1,5 +1,5 @@
 from print_cliente import imprimir_retorno
-from conectar import enviar_mensagem
+from conexao import enviar_mensagem
 
 def teste_arquivo(caminho_arquivo, client_socket, server_ip, server_port, max_tentativas):
     req_id = 0

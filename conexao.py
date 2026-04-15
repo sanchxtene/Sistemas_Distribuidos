@@ -28,10 +28,12 @@ def enviar_mensagem(client_socket, mensagem, server_ip, server_port, max_tentati
     tentativa = 0
 
     while tentativa < max_tentativas:
+        # Envia mensagem
         client_socket.sendto(mensagem.encode(), (server_ip, server_port))
         client_socket.settimeout(0.01)
 
         try:
+            # Espera o retorno
             data, _ = client_socket.recvfrom(1024)
             return data.decode() # sucesso → sai do loop
 
