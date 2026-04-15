@@ -35,7 +35,7 @@ while True:
     if msg == "DISCOVERY":
         if addr not in tabela_clientes:
             # Cria cliente na tabela
-            # USAR UNSIGNED INT de 64 bits
+            # ---------USAR UNSIGNED INT de 64 bits------------
             tabela_clientes[addr] = {
                 "last_req": 0,
                 "last_num_reqs": 0,
@@ -61,6 +61,16 @@ while True:
             if req_user <= ultima_requisicao:
                 imprimir_duplicada(tabela_clientes, addr, numero)
                 continue
+
+            """
+            Caso negativo, o servidor deverá responder a requisição com uma mensagem de ACK com o
+            último número de identificação de requisição recebida e processada (dado que se tratará de uma retransmissão de
+            uma mensagem para a qual o cliente não recebeu um ack do servidor).
+            Por outro lado, caso o servidor receba uma mensagem do cliente com um número de identificação superior ao
+            próximo identificador esperado, o servidor deverá responder a requisição com uma mensagem de ACK com o
+            último número de identificação de requisição recebida e processada, indicando assim que alguma requisição
+            anterior foi perdida.
+            """
 
             # soma ao acumulador
             total += numero

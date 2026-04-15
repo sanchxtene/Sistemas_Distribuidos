@@ -31,6 +31,12 @@ client_socket.sendto(b"DISCOVERY", (BROADCAST_IP, porta))
 # IP do servidor
 SERVER_IP = conectar_com_servidor(client_socket, max_tentativas)
 
+"""
+A interface do cliente deve ter uma thread para escrever as mensagens na tela, e outra thread para ler os
+comandos digitados pelo(a) usuário(a). Ao apertar CTRL+C (interrupção) ou CTRL+D (fim de arquivo), o processo
+cliente deverá encerrar, sinalizando ao manager que o(a) usuário(a) está saindo do serviço (similar a EXIT)
+"""
+
 # ----- Processamento -----
 # Numero máximo de tentativas por erro de timeout ajustável no arquivo "processamento_manual.py" ou "processamento_automatico.py"
 
