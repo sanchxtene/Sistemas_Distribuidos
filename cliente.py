@@ -16,6 +16,9 @@ porta = int(sys.argv[1])
 # BROADCAST_IP = '255.255.255.255'
 BROADCAST_IP = "127.0.0.1"
 
+# Número máximo de tentativas de envio de mensagem sem ACK
+max_tentativas = 3
+
 # Cria socket UDP
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -25,17 +28,15 @@ client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 # Descoberta
 client_socket.sendto(b"DISCOVERY", (BROADCAST_IP, porta))
 
-# ADD settimeout e tentar novamente se não funcionar?
-
 # IP do servidor
-SERVER_IP = conectar_com_servidor(client_socket)
+SERVER_IP = conectar_com_servidor(client_socket, max_tentativas)
 
 # ----- Processamento -----
-# Numero máximo de tentativas por erro de timeout ajustável no arquivo "processamento.py"
+# Numero máximo de tentativas por erro de timeout ajustável no arquivo "processamento_manual.py" ou "processamento_automatico.py"
 
 # TESTANDO COM ARQUIVOS DE TESTE
-#caminho_arquivo = ("RAND_NUM_1.txt")
-#teste_arquivo(caminho_arquivo, client_socket, SERVER_IP, PROCESS_PORT)
+caminho_arquivo = ("RAND_NUM_1.txt")
+teste_arquivo(caminho_arquivo, client_socket, SERVER_IP, porta, max_tentativas)
 
 # TESTANDO À MÃO
-teste_manual(client_socket, SERVER_IP, porta)
+# teste_manual(client_socket, SERVER_IP, porta, max_tentativas)

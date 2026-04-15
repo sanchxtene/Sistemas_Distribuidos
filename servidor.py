@@ -2,10 +2,6 @@ import sys
 import socket
 from print_servidor import imprimir_inicializacao, imprimir_duplicada, imprimir_requisicao, retorno_requisicao
 
-# DEPOIS DE ARRUMAR TUDO VER A PARTE DE INTERFACE DO CLIENTE (pg. 4)
-# REVISAR
-# RELATÓRIO
-
 # Configuração da porta servidor passada por parâmetro
 if len(sys.argv) < 2:
     print("Erro - Falta de Parametros - Entrada deve ser: python cliente.py <PORTA>")
@@ -46,7 +42,7 @@ while True:
                 "last_total_sum": 0
             }
             # Envia resposta ao cliente
-            resposta = f"SERVER|{socket.gethostbyname(socket.gethostname())}|{porta}"
+            resposta = f"{socket.gethostbyname(socket.gethostname())}"
             servidor.sendto(resposta.encode(), addr)
             print(f"Discovery respondido para {addr}")
 
@@ -86,10 +82,3 @@ while True:
 
         except Exception as e:
             print("Erro ao processar", e)
-
-
-
-
-
-
-
