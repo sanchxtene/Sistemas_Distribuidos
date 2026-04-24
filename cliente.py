@@ -13,8 +13,7 @@ if len(sys.argv) < 2:
 porta = int(sys.argv[1])
 
 # Configuração do servidor
-# BROADCAST_IP = '255.255.255.255'
-BROADCAST_IP = "127.0.0.1"
+BROADCAST_IP = '255.255.255.255'
 
 # Número máximo de tentativas de envio de mensagem sem ACK
 max_tentativas = 3
