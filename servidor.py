@@ -50,7 +50,7 @@ while True:
             # Envia resposta ao cliente
             resposta = f"{socket.gethostbyname(socket.gethostname())}"
             servidor.sendto(resposta.encode(), addr)
-            print(f"Discovery respondido para {addr}")
+            #print(f"Discovery respondido para {addr}")
 
     # PROCESSAMENTO
     else:
@@ -62,15 +62,14 @@ while True:
 
             # Consulta tabela para ver o id da última requisição do cliente
             id_ultima_requisicao = tabela_clientes[addr]["last_req"]
+            id_requisicao_esperada = id_ultima_requisicao + 1 
+
             # mensagem duplicada
-            if id_req_user <= id_ultima_requisicao:
+            if id_req_user < id_requisicao_esperada:
                 imprimir_duplicada(tabela_clientes, addr, numero)
                 continue
-
-            # id esperado pelo servidor
-            id_requisicao_esperada = id_ultima_requisicao + 1 
             # mensagem fora de ordem, se for maior que id esperado alguma mensagem se perdeu no caminho
-            if id_req_user > id_requisicao_esperada:
+            elif id_req_user > id_requisicao_esperada: 
                 """
                     Por outro lado, caso o servidor receba uma mensagem do cliente com um número de identificação superior ao
                 próximo identificador esperado, o servidor deverá responder a requisição com uma mensagem de ACK com o
@@ -100,4 +99,4 @@ while True:
             servidor.sendto(resposta.encode(), addr)
 
         except Exception as e:
-            print("Erro ao processar", e)
+            continue
