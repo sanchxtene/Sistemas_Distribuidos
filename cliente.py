@@ -1,7 +1,6 @@
 import sys
 import socket
-from processamento_manual import teste_manual
-from processamento_automatico import teste_arquivo
+from processamento import entrada_por_arquivo, entrada_manual
 from conexao import conectar_com_servidor
 
 
@@ -27,16 +26,10 @@ client_socket.sendto(b"DISCOVERY", (BROADCAST_IP, porta))
 # IP do servidor
 SERVER_IP = conectar_com_servidor(client_socket)
 
-"""
-A interface do cliente deve ter uma thread para escrever as mensagens na tela, e outra thread para ler os
-comandos digitados pelo(a) usuário(a). Ao apertar CTRL+C (interrupção) ou CTRL+D (fim de arquivo), o processo
-cliente deverá encerrar, sinalizando ao manager que o(a) usuário(a) está saindo do serviço (similar a EXIT)
-"""
-
 # ----- Processamento -----
 # TESTANDO COM ARQUIVOS DE TESTE
-caminho_arquivo = ("RAND_NUM_4.txt")
-teste_arquivo(caminho_arquivo, client_socket, SERVER_IP, porta)
+caminho_arquivo = ("RAND_NUM_1.txt")
+entrada_por_arquivo(caminho_arquivo, client_socket, SERVER_IP, porta)
 
 # TESTANDO À MÃO
-#teste_manual(client_socket, SERVER_IP, porta)
+#entrada_manual(client_socket, SERVER_IP, porta)

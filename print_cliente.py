@@ -1,11 +1,13 @@
 import datetime
 
+# Informa que o cliente se conectou com o servidor
 def imprimir_conexao(server_ip):
     time = datetime.datetime.now()
     time_str = time.strftime('%Y-%m-%d %H:%M:%S')
     print(f"{time_str} "
           f"server_addr {server_ip} ")
-    
+
+# Informa que o servidor processou a mensagem
 def imprimir_retorno(server_ip, req_id, numero, num_reqs, total_sum):
     time = datetime.datetime.now()
     time_str = time.strftime('%Y-%m-%d %H:%M:%S')

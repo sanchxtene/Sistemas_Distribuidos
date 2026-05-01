@@ -4,11 +4,6 @@ import numpy as np
 from print_servidor import imprimir_inicializacao, imprimir_duplicada, imprimir_requisicao, retorno_requisicao
 
 
-"""
-Precisa de alguma maneira de 'fechar' o servidor, atualmente ele não desliga, só fechando o terminal, precisa de um CRTL+C
-Funcionou para Linux
-"""
-
 # Configuração da porta servidor passada por parâmetro
 if len(sys.argv) < 2:
     print("Erro - Falta de Parametros - Entrada deve ser: python cliente.py <PORTA>")
@@ -20,7 +15,7 @@ servidor = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 servidor.bind(('', porta))
 print(f"Servidor rodando na porta {porta}")
 
-# Acumulador e requisições totais
+# Acumulador e contador de requisições totais
 total = np.uint64(0)
 req_global = 0
 
@@ -35,6 +30,7 @@ tabela_servidor = {
 imprimir_inicializacao(tabela_servidor)
 
 while True:
+    # Mensagem recebida pelo servidor
     data, addr = servidor.recvfrom(1024)
     msg = data.decode()
     
@@ -47,10 +43,9 @@ while True:
                 "last_num_reqs": 0,
                 "last_total_sum": np.uint64(0)
             }
-            # Envia resposta ao cliente
+            # Envia resposta ao cliente contendo o IP do servidor
             resposta = f"{socket.gethostbyname(socket.gethostname())}"
             servidor.sendto(resposta.encode(), addr)
-            #print(f"Discovery respondido para {addr}")
 
     # PROCESSAMENTO
     else:
@@ -80,7 +75,7 @@ while True:
                 servidor.sendto(resposta.encode(), addr)
                 continue
 
-            # soma ao acumulador
+            # soma ao acumulador e incrementa contador de requisições
             total += np.uint64(numero)
             req_global += 1
 
