@@ -1,8 +1,12 @@
 import sys
 import socket
 import numpy as np
-from print_servidor import imprimir_inicializacao, imprimir_duplicada, imprimir_requisicao, retorno_requisicao
-
+import threading
+import json
+from print_servidor import imprimir_inicializacao
+from cluster import descobrir_lider
+from loops import discovery_loop, cluster_loop, processamento_loop
+from estado import ServidorState
 
 # Configuração da porta servidor passada por parâmetro
 if len(sys.argv) < 2:
@@ -10,88 +14,128 @@ if len(sys.argv) < 2:
     exit()
 porta = int(sys.argv[1])
 
-# Cria o socket 
-servidor = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-servidor.bind(('', porta))
+# Cria o sockets 
+DISCOVERY_PORT = 3999
+
+# clientes
+service_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+service_sock.bind(('', porta))
+
+# comunicação entre servidores
+cluster_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+cluster_sock.bind(('', porta + 100))
+
+discovery_sock = None
+
 print(f"Servidor rodando na porta {porta}")
+print(f"Cluster na porta {porta+100}")
 
-# Acumulador e contador de requisições totais
-total = np.uint64(0)
-req_global = 0
+estado = ServidorState()
 
-# Aramazena address (como indice), last_req, last_num_reqs, e last_total_sum
-tabela_clientes = {}
+lider = descobrir_lider(cluster_sock, porta + 100)
 
-tabela_servidor = {
-    "num_reqs": 0,
-    "total_sum": np.uint64(0)
-}
 
-imprimir_inicializacao(tabela_servidor)
+if lider is None:
+
+    estado.rm_id = 1
+    estado.role = "PRIMARY"
+
+    estado.next_id = 2
+
+    estado.primary_id = estado.rm_id
+    estado.primary_addr = ("localhost", porta)
+
+    estado.members[estado.rm_id] = estado.primary_addr
+
+    discovery_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    discovery_sock.bind(("", DISCOVERY_PORT))
+
+    threading.Thread(
+        target=discovery_loop,
+        args=(
+            discovery_sock,
+            porta,
+            estado
+        ),
+        daemon=True
+    ).start()
+
+    print(f"RM {estado.rm_id} iniciado como PRIMARY")
+
+else:
+    cluster_sock.settimeout(2)
+
+    # Mensagem de JOIN ao Líder
+    resposta = f"JOIN"
+    cluster_sock.sendto(resposta.encode(), lider)
+
+    try:
+        data, server_addr = cluster_sock.recvfrom(1024)
+        msg = data.decode()
+
+        if not msg.startswith("CLUSTER|"):
+            raise Exception(
+                f"Mensagem inesperada: {msg}"
+            )
+
+        payload = json.loads(
+            msg[len("CLUSTER|"):]
+        )
+
+        estado.rm_id = payload["rm_id"]
+        estado.primary_id = payload["primary_id"]
+
+        estado.members = {
+            int(k): tuple(v)
+            for k, v in payload["members"].items()
+        }
+
+        estado.role = "BACKUP"
+
+        estado.primary_addr = lider
+
+        print(
+            f"RM {estado.rm_id} iniciado como BACKUP "
+            f"(lider={estado.primary_id})"
+        )
+
+        print("MEMBERS:")
+        print(estado.members)
+
+    except socket.timeout:
+        print("Falha ao entrar no cluster")
+        exit()
+    
+    finally:
+        cluster_sock.settimeout(None)
+
+imprimir_inicializacao(estado.tabela_servidor)
+
+cluster_thread = threading.Thread(
+    target=cluster_loop,
+    args=(
+        cluster_sock,
+        estado
+    ),
+    daemon=True
+)
+
+processamento_thread = threading.Thread(
+    target=processamento_loop,
+    args=(
+        service_sock,
+        cluster_sock,
+        estado
+    ),
+    daemon=True
+)
+
+cluster_thread.start()
+processamento_thread.start()
+
+cluster_thread.join()
+processamento_thread.join()
 
 while True:
-    # Mensagem recebida pelo servidor
-    data, addr = servidor.recvfrom(1024)
-    msg = data.decode()
-    
-    # DISCOVERY
-    if msg == "DISCOVERY":
-        if addr not in tabela_clientes:
-            # Cria cliente na tabela
-            tabela_clientes[addr] = {
-                "last_req": 0,
-                "last_num_reqs": 0,
-                "last_total_sum": np.uint64(0)
-            }
-            # Envia resposta ao cliente contendo o IP do servidor
-            resposta = f"{socket.gethostbyname(socket.gethostname())}"
-            servidor.sendto(resposta.encode(), addr)
+    threading.Event().wait(1)
 
-    # PROCESSAMENTO
-    else:
-        try:
-            # formato: req_id|numero
-            id_req_user, numero = msg.split('|')
-            id_req_user = int(id_req_user)
-            numero = int(numero)
-
-            # Consulta tabela para ver o id da última requisição do cliente
-            id_ultima_requisicao = tabela_clientes[addr]["last_req"]
-            id_requisicao_esperada = id_ultima_requisicao + 1 
-
-            # mensagem duplicada
-            if id_req_user < id_requisicao_esperada:
-                imprimir_duplicada(tabela_clientes, addr, numero)
-                continue
-            # mensagem fora de ordem, se for maior que id esperado alguma mensagem se perdeu no caminho
-            elif id_req_user > id_requisicao_esperada: 
-                """
-                    Por outro lado, caso o servidor receba uma mensagem do cliente com um número de identificação superior ao
-                próximo identificador esperado, o servidor deverá responder a requisição com uma mensagem de ACK com o
-                último número de identificação de requisição recebida e processada, indicando assim que alguma requisição
-                anterior foi perdida.
-                """
-                resposta = f"{id_ultima_requisicao}"
-                servidor.sendto(resposta.encode(), addr)
-                continue
-
-            # soma ao acumulador e incrementa contador de requisições
-            total += np.uint64(numero)
-            req_global += 1
-
-            # Atualizar tabela clientes
-            tabela_clientes[addr]["last_req"] = id_req_user
-            tabela_clientes[addr]["last_num_reqs"] = req_global
-            tabela_clientes[addr]["last_total_sum"] = total
-
-            # Atualizar tabela servidor
-            tabela_servidor["num_reqs"] = req_global 
-            tabela_servidor["total_sum"] = total
-
-            # Envia ACK ao cliente
-            imprimir_requisicao(tabela_clientes, addr, numero)
-            resposta = retorno_requisicao(tabela_clientes, addr, numero)
-            servidor.sendto(resposta.encode(), addr)
-
-        except Exception as e:
-            continue

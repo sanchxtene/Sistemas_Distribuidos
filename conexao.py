@@ -3,14 +3,17 @@ import signal
 import sys
 import queue
 import threading
-from print_cliente import imprimir_conexao, imprimir_retorno
+import json
+import time
+import traceback
+from print_cliente import imprimir_retorno
 
 max_tentativas = 3
 
 running = True
 client_sock = None
-server_addr_global = None
-server_port_global = None
+SERVER_IP_global = None
+SERVER_PORT_global = None
 
 acks  = {}
 historico = {}
@@ -19,18 +22,37 @@ lock = threading.Lock()
 # fila de pedidos de retransmissão
 retransmit_queue = queue.Queue()
 
+leader_lock = threading.Lock()
+
 
 def conectar_com_servidor(client_socket):
     tentativa = 0
 
+    global SERVER_IP
+    global SERVER_PORT
+
     while tentativa < max_tentativas:
         try:
+            client_socket.settimeout(1)
             # Servidor responde com o endereço IP
-            data, server_addr = client_socket.recvfrom(1024)
-            client_socket.settimeout(0.01)
-            msg = data.decode()
-            imprimir_conexao(msg)
-            return server_addr[0]  # sucesso → sai do loop
+            data, addr = client_socket.recvfrom(1024)
+
+            payload = json.loads(
+                data.decode()
+            )
+
+            with leader_lock:
+                SERVER_IP = payload["ip"]
+                SERVER_PORT = payload["porta"]
+
+            print(
+                f"Conectado ao líder "
+                f"{SERVER_IP}:{SERVER_PORT}"
+            )
+        
+            client_socket.setblocking(True)
+
+            return  # sucesso → sai do loop
 
         except socket.timeout:
             # Servidor não respondeu
@@ -42,21 +64,67 @@ def conectar_com_servidor(client_socket):
     return None 
 
 
+def reconectar(client_socket):
+
+    global SERVER_IP
+    global SERVER_PORT
+
+    print("Tentando localizar novo líder...")
+
+    while True:
+
+        try:
+            for p in [4000,4001,4002,4003,4004]:
+                client_socket.sendto(
+                    b"DISCOVERY",
+                    ("localhost", p)
+                )
+
+            resultado = conectar_com_servidor(
+                client_socket
+            )
+
+            if resultado is None:
+                raise RuntimeError("Nenhum líder encontrado")
+
+            SERVER_IP, SERVER_PORT = resultado
+
+            print(
+                f"Novo líder encontrado: "
+                f"{SERVER_IP}:{SERVER_PORT}"
+            )
+
+            return SERVER_IP, SERVER_PORT
+
+        except Exception:
+
+            print(
+                "Nenhum líder disponível. "
+                "Tentando novamente..."
+            )
+
+            time.sleep(1)
+
+
 def encerrar_conexao(sig, frame):
+    global SERVER_IP
+    global SERVER_PORT
+
     global running
     print("\nEncerrando cliente...")
     running = False
     try:
         if client_sock:
-            client_sock.sendto(b"EXIT", (server_addr_global, server_port_global))
+            client_sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
     except:
         pass
 
+    signal.signal(signal.SIGINT, encerrar_conexao)
 
-signal.signal(signal.SIGINT, encerrar_conexao)
 
 
-def processar_retransmissoes(sock, server_addr, server_port):
+
+def processar_retransmissoes(sock, SERVER_IP, SERVER_PORT):
     """
     Executado pelo input_thread.
     Processa pedidos de reenvio vindos da função receive_thread.
@@ -69,14 +137,17 @@ def processar_retransmissoes(sock, server_addr, server_port):
             msg = historico.get(faltante)
 
         if msg:
-            sock.sendto(msg.encode(), (server_addr, server_port))
+            sock.sendto(msg.encode(), (SERVER_IP, SERVER_PORT))
 
 
-def enviar_com_timeout(sock, server_addr, server_port, req_id, numero):
+def enviar_com_timeout(sock, req_id, numero):
     """
     Executado pelo manual_input_thread ou automatic_input_thread.
     Processa pedidos de envio utilizando timeout e várias tentativas caso necessário.
     """
+    global SERVER_IP
+    global SERVER_PORT
+
     mensagem = f"{req_id}|{numero}"
 
     evento = threading.Event()
@@ -86,33 +157,32 @@ def enviar_com_timeout(sock, server_addr, server_port, req_id, numero):
         historico[req_id] = mensagem
 
     for tentativa in range(max_tentativas):
+        with leader_lock:
+            destino = (SERVER_IP, SERVER_PORT)
+
         sock.sendto(
             mensagem.encode(),
-            (server_addr, server_port)
+            destino
         )
 
-        if evento.wait(timeout=0.01):
+        if evento.wait(timeout=1):
             with lock:
                 acks.pop(req_id,None)
             return True
 
-    print("Servidor indisponível.")
+    reconectar(sock)
     return False
 
 
-def manual_input_thread(sock, server_addr, server_port):
+def manual_input_thread(sock):
     """
     Executada por cliente.py
     Recebe entradas do usuário pelo teclado e utiliza a função enviar_com_timeout para envia-las ao servidor.
     """
     global running
     global client_sock 
-    global server_addr_global 
-    global server_port_global 
-
-    client_sock = sock
-    server_addr_global = server_addr
-    server_port_global = server_port
+    global SERVER_IP
+    global SERVER_PORT
 
     req_id = 0
 
@@ -120,14 +190,14 @@ def manual_input_thread(sock, server_addr, server_port):
         while running:
             # antes de nova requisição,
             # verifica se servidor pediu reenvio
-            processar_retransmissoes(sock, server_addr, server_port)
+            processar_retransmissoes(sock, SERVER_IP, SERVER_PORT)
 
             entrada = input()
 
             numero = int(entrada)
             req_id += 1
 
-            ok = enviar_com_timeout(sock, server_addr, server_port, req_id, numero)
+            ok = enviar_com_timeout(sock, req_id, numero)
 
             if not ok:
                 running = False
@@ -135,32 +205,28 @@ def manual_input_thread(sock, server_addr, server_port):
 
     except EOFError:
         print("\nEOF recebido. Encerrando...")
-        sock.sendto(b"EXIT", (server_addr, server_port))
+        sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
         running = False
     
     except KeyboardInterrupt:
         print("\nCTRL+C recebido. Encerrando...")
-        sock.sendto(b"EXIT", (server_addr, server_port))
+        sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
         running = False
 
     except Exception as e:
-        print("Erro input_thread:", e)
+        traceback.print_exc()
 
 
 
-def automatic_input_thread(sock, server_addr, server_port, caminho_arquivo):
+def automatic_input_thread(sock, caminho_arquivo):
     """
     Executada por cliente.py
     Recebe entradas vinda de um arquivo e utiliza a função enviar_com_timeout para envia-las ao servidor.
     """
     global running
     global client_sock 
-    global server_addr_global 
-    global server_port_global 
-
-    client_sock = sock
-    server_addr_global = server_addr
-    server_port_global = server_port
+    global SERVER_IP
+    global SERVER_PORT
     
     req_id = 0
 
@@ -172,7 +238,7 @@ def automatic_input_thread(sock, server_addr, server_port, caminho_arquivo):
 
                 # antes de nova requisição,
                 # verifica se servidor pediu reenvio
-                processar_retransmissoes(sock, server_addr, server_port)
+                processar_retransmissoes(sock, SERVER_IP, SERVER_PORT)
 
                 linha = linha.strip()
 
@@ -182,23 +248,23 @@ def automatic_input_thread(sock, server_addr, server_port, caminho_arquivo):
                 numero = int(linha)
                 req_id += 1
 
-                ok = enviar_com_timeout(sock, server_addr, server_port, req_id, numero)
+                ok = enviar_com_timeout(sock, req_id, numero)
 
                 if not ok:
                     running = False
                     break
 
             print("\nEOF recebido. Encerrando...")
-            sock.sendto(b"EXIT", (server_addr, server_port))
-            running = False
+            #sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
+            #running = False
     
     except EOFError:
         print("\nEOF recebido. Encerrando...")
-        sock.sendto(b"EXIT", (server_addr, server_port))
-        running = False
+        #sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
+        #running = False
 
     except Exception as e:
-        print("Erro input_thread:", e)
+        traceback.print_exc()
 
 
 
@@ -210,6 +276,8 @@ def receive_thread(sock):
     o id da mensagem faltante para ser enviada novamente
     """
     global running
+    global SERVER_IP
+    global SERVER_PORT
 
     while running:
         try:
@@ -248,10 +316,24 @@ def receive_thread(sock):
                 continue
 
             print("Mensagem inesperada:", resposta)
-            
+
         except socket.timeout:
+            print("TIMEOUT!")
+            
+        except ConnectionResetError:
+            print(
+                "Servidor indisponível. "
+                "Procurando novo líder..."
+            )
+
+            novo_ip, nova_porta = reconectar(sock)
+
+            with leader_lock:
+                SERVER_IP = novo_ip
+                SERVER_PORT = nova_porta
+
             continue
 
         except Exception as e:
-            print("Erro receive_thread:", e)
+            traceback.print_exc()
             break

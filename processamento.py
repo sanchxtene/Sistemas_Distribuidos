@@ -2,8 +2,8 @@ import threading
 from conexao import automatic_input_thread, manual_input_thread, receive_thread
 
 
-def entrada_por_arquivo(caminho_arquivo, client_socket, server_ip, server_port):
-    t1 = threading.Thread(target=automatic_input_thread, args=(client_socket, server_ip, server_port, caminho_arquivo))
+def entrada_por_arquivo(caminho_arquivo, client_socket):
+    t1 = threading.Thread(target=automatic_input_thread, args=(client_socket, caminho_arquivo))
     t2 = threading.Thread(target=receive_thread, args=(client_socket,))
 
     t1.start()
@@ -13,8 +13,8 @@ def entrada_por_arquivo(caminho_arquivo, client_socket, server_ip, server_port):
     t2.join()
 
 
-def entrada_manual(client_socket, server_ip, server_port):
-    t1 = threading.Thread(target=manual_input_thread, args=(client_socket, server_ip, server_port))
+def entrada_manual(client_socket):
+    t1 = threading.Thread(target=manual_input_thread, args=(client_socket,))
     t2 = threading.Thread(target=receive_thread, args=(client_socket,))
 
     t1.start()
