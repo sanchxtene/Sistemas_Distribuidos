@@ -1,7 +1,7 @@
 import json
 import numpy as np
 
-from cluster import enviar_members_update, replicar_estado
+from cluster import enviar_members_update, replicar_estado, desserializar_clientes
 from print_servidor import imprimir_duplicada, imprimir_requisicao, retorno_requisicao
 
 
@@ -53,13 +53,17 @@ def cluster_loop(cluster_sock, estado):
 
           continue
 
-        # UPDATE SOMA TOTAL 
+        # UPDATE BACKUPS
         elif payload["type"] == "STATE_UPDATE":
 
           with estado.state_lock:
 
               estado.req_global = payload["req_global"]
               estado.total = np.uint64(payload["total"])
+
+              estado.tabela_clientes = (
+                  desserializar_clientes(payload["clientes"])
+              )
 
               estado.tabela_servidor["num_reqs"] = estado.req_global
               estado.tabela_servidor["total_sum"] = estado.total
@@ -68,6 +72,18 @@ def cluster_loop(cluster_sock, estado):
             f"[RM {estado.rm_id}] Estado atualizado: "
             f"reqs={estado.req_global} total={estado.total}"
           )
+
+          print("\n=== ESTADO BACKUP ===")
+          print("req_global =", estado.req_global)
+          print("total =", estado.total)
+          for addr, dados in estado.tabela_clientes.items():
+              print(
+                  f"cliente={addr[0]}:{addr[1]} | "
+                  f"last_req={dados['last_req']} | "
+                  f"num_reqs={dados['last_num_reqs']} | "
+                  f"total_sum={dados['last_total_sum']}"
+              )
+          print("=====================\n")
 
           continue
       
@@ -158,13 +174,18 @@ def processamento_loop(service_sock, cluster_sock, estado):
         estado.tabela_clientes[addr]["last_num_reqs"] = estado.req_global
         estado.tabela_clientes[addr]["last_total_sum"] = estado.total
 
-      replicar_estado(cluster_sock, estado.members, estado.rm_id, req_global, total)
+      replicar_estado(cluster_sock, estado.members, estado.rm_id, req_global, total, estado.tabela_clientes)
 
       # Envia ACK ao cliente
       imprimir_requisicao(estado.tabela_clientes, addr, numero)
       resposta = retorno_requisicao(estado.tabela_clientes, addr, numero)
 
       service_sock.sendto(resposta.encode(), addr)
+
+      print("\n=== CLIENTES PRIMARY ===")
+      for addr, dados in estado.tabela_clientes.items():
+          print(addr, dados)
+      print("========================\n")
 
     except Exception as e:
       continue
