@@ -8,6 +8,8 @@ import time
 import traceback
 from print_cliente import imprimir_retorno
 
+BROADCAST_IP = '255.255.255.255'
+
 max_tentativas = 3
 
 running = True
@@ -37,9 +39,7 @@ def conectar_com_servidor(client_socket):
             # Servidor responde com o endereço IP
             data, addr = client_socket.recvfrom(1024)
 
-            payload = json.loads(
-                data.decode()
-            )
+            payload = json.loads(data.decode())
 
             with leader_lock:
                 SERVER_IP = payload["ip"]
@@ -49,8 +49,6 @@ def conectar_com_servidor(client_socket):
                 f"Conectado ao líder "
                 f"{SERVER_IP}:{SERVER_PORT}"
             )
-        
-            client_socket.setblocking(True)
 
             return  # sucesso → sai do loop
 
@@ -65,7 +63,6 @@ def conectar_com_servidor(client_socket):
 
 
 def reconectar(client_socket):
-
     global SERVER_IP
     global SERVER_PORT
 
@@ -74,15 +71,9 @@ def reconectar(client_socket):
     while True:
 
         try:
-            for p in [4000,4001,4002,4003,4004]:
-                client_socket.sendto(
-                    b"DISCOVERY",
-                    ("localhost", p)
-                )
+            client_socket.sendto(b"DISCOVERY", (BROADCAST_IP, SERVER_PORT))
 
-            resultado = conectar_com_servidor(
-                client_socket
-            )
+            resultado = conectar_com_servidor(client_socket)
 
             if resultado is None:
                 raise RuntimeError("Nenhum líder encontrado")
@@ -109,10 +100,12 @@ def reconectar(client_socket):
 def encerrar_conexao(sig, frame):
     global SERVER_IP
     global SERVER_PORT
-
     global running
+
     print("\nEncerrando cliente...")
+    
     running = False
+    
     try:
         if client_sock:
             client_sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
@@ -160,10 +153,7 @@ def enviar_com_timeout(sock, req_id, numero):
         with leader_lock:
             destino = (SERVER_IP, SERVER_PORT)
 
-        sock.sendto(
-            mensagem.encode(),
-            destino
-        )
+        sock.sendto(mensagem.encode(), destino)
 
         if evento.wait(timeout=1):
             with lock:
@@ -215,7 +205,6 @@ def manual_input_thread(sock):
 
     except Exception as e:
         traceback.print_exc()
-
 
 
 def automatic_input_thread(sock, caminho_arquivo):

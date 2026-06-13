@@ -4,8 +4,8 @@ import numpy as np
 import threading
 import json
 from print_servidor import imprimir_inicializacao
-from cluster import descobrir_lider
-from loops import discovery_loop, cluster_loop, processamento_loop
+from cluster import descobrir_lider, desserializar_clientes
+from loops import cluster_loop, processamento_loop
 from estado import ServidorState
 
 # Configuração da porta servidor passada por parâmetro
@@ -14,8 +14,7 @@ if len(sys.argv) < 2:
     exit()
 porta = int(sys.argv[1])
 
-# Cria o sockets 
-DISCOVERY_PORT = 3999
+BROADCAST_IP = '255.255.255.255'
 
 # clientes
 service_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -23,9 +22,8 @@ service_sock.bind(('', porta))
 
 # comunicação entre servidores
 cluster_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+cluster_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 cluster_sock.bind(('', porta + 100))
-
-discovery_sock = None
 
 print(f"Servidor rodando na porta {porta}")
 print(f"Cluster na porta {porta+100}")
@@ -43,22 +41,9 @@ if lider is None:
     estado.next_id = 2
 
     estado.primary_id = estado.rm_id
-    estado.primary_addr = ("localhost", porta)
+    estado.primary_addr = (socket.gethostbyname(socket.gethostname()), porta)
 
     estado.members[estado.rm_id] = estado.primary_addr
-
-    discovery_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    discovery_sock.bind(("", DISCOVERY_PORT))
-
-    threading.Thread(
-        target=discovery_loop,
-        args=(
-            discovery_sock,
-            porta,
-            estado
-        ),
-        daemon=True
-    ).start()
 
     print(f"RM {estado.rm_id} iniciado como PRIMARY")
 
@@ -89,6 +74,21 @@ else:
             int(k): tuple(v)
             for k, v in payload["members"].items()
         }
+
+        estado.next_id = payload["next_id"]
+
+        estado.req_global = payload["req_global"]
+
+        estado.total = np.uint64(
+            payload["total"]
+        )
+
+        estado.tabela_clientes = desserializar_clientes(
+            payload["clientes"]
+        )
+
+        estado.tabela_servidor["num_reqs"] = estado.req_global
+        estado.tabela_servidor["total_sum"] = estado.total
 
         estado.role = "BACKUP"
 

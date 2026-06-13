@@ -1,31 +1,10 @@
 import json
 import numpy as np
-
-from cluster import enviar_members_update, replicar_estado, desserializar_clientes
+import socket
+from cluster import enviar_members_update, replicar_estado, desserializar_clientes, serializar_clientes
 from print_servidor import imprimir_duplicada, imprimir_requisicao, retorno_requisicao
 
-
-def discovery_loop(discovery_sock, porta, estado):
-  while estado.role == "PRIMARY":
-
-    try:
-      data, addr = discovery_sock.recvfrom(1024)
-
-      if data.decode() != "DISCOVERY":
-        continue
-
-      payload = {
-        "ip": "127.0.0.1",
-        "porta": porta,
-        "rm_id": estado.rm_id
-      }
-
-      discovery_sock.sendto(json.dumps(payload).encode(), addr)
-
-    except Exception:
-        pass
-    
-
+   
 def cluster_loop(cluster_sock, estado):
   while True:
 
@@ -47,9 +26,11 @@ def cluster_loop(cluster_sock, estado):
               int(k): tuple(v)
               for k, v in payload["members"].items()
             }
+            estado.next_id = payload["next_id"]
 
           print("MEMBERS atualizado:")
           print(estado.members)
+          print(estado.next_id)
 
           continue
 
@@ -100,21 +81,33 @@ def cluster_loop(cluster_sock, estado):
           novo_id = estado.next_id
           estado.members[novo_id] = addr
           estado.next_id += 1
-          payload = {
-              "type": "JOIN_ACK",
-              "rm_id": novo_id,
-              "primary_id": estado.primary_id,
-              "members": dict(estado.members)
-          }
+
+          with estado.state_lock:
+            payload = {
+                "type": "JOIN_ACK",
+                "rm_id": novo_id,
+                "primary_id": estado.primary_id,
+                "members": dict(estado.members),
+                "next_id": estado.next_id,
+
+                # estado atual do sistema
+                "req_global": estado.req_global,
+                "total": int(estado.total),
+                "clientes": serializar_clientes(
+                    estado.tabela_clientes
+                )
+            }
 
           resposta = f"CLUSTER|{json.dumps(payload)}"
 
           cluster_sock.sendto(resposta.encode(), addr)
 
-          enviar_members_update(cluster_sock, estado.members)
+          enviar_members_update(cluster_sock, estado.members, estado.rm_id, estado.next_id)
 
     except Exception as e:
                 print("ERRO CLUSTER:", e)
+
+
 
 def processamento_loop(service_sock, cluster_sock, estado):
   while True:
@@ -122,6 +115,21 @@ def processamento_loop(service_sock, cluster_sock, estado):
     data, addr = service_sock.recvfrom(1024)
 
     msg = data.decode()
+
+    if estado.role != "PRIMARY":
+      continue
+
+    if msg == "DISCOVERY":
+
+      payload = {
+          "ip":  socket.gethostbyname(socket.gethostname()),
+          "porta": service_sock.getsockname()[1],
+          "rm_id": estado.rm_id
+      }
+
+      service_sock.sendto(json.dumps(payload).encode(), addr)
+
+      continue
 
     try:
       with estado.state_lock:
@@ -145,6 +153,7 @@ def processamento_loop(service_sock, cluster_sock, estado):
       if id_req_user < id_requisicao_esperada:
         imprimir_duplicada(estado.tabela_clientes, addr, numero)
         continue
+      
       # mensagem fora de ordem, se for maior que id esperado alguma mensagem se perdeu no caminho
       elif id_req_user > id_requisicao_esperada: 
         """
@@ -174,7 +183,10 @@ def processamento_loop(service_sock, cluster_sock, estado):
         estado.tabela_clientes[addr]["last_num_reqs"] = estado.req_global
         estado.tabela_clientes[addr]["last_total_sum"] = estado.total
 
-      replicar_estado(cluster_sock, estado.members, estado.rm_id, req_global, total, estado.tabela_clientes)
+      with estado.membership_lock:
+        members = dict(estado.members)
+
+      replicar_estado(cluster_sock, members, estado.rm_id, req_global, total, estado.tabela_clientes)
 
       # Envia ACK ao cliente
       imprimir_requisicao(estado.tabela_clientes, addr, numero)
@@ -188,4 +200,4 @@ def processamento_loop(service_sock, cluster_sock, estado):
       print("========================\n")
 
     except Exception as e:
-      continue
+      print("ERRO PROCESSAMENTO:", e)
