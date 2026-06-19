@@ -1,6 +1,7 @@
 import socket
 import json
 import numpy as np
+from obter_ip_maquina import obter_ip_local
 
 BROADCAST_IP = '255.255.255.255'
 
@@ -38,25 +39,29 @@ def desserializar_clientes(clientes_json):
 
 
 def descobrir_lider(sock, cluster_port):
-    try:
-        sock.settimeout(2)
+    sock.settimeout(2)
 
+    try:
         sock.sendto(b"RM_DISCOVERY", (BROADCAST_IP, cluster_port))
 
-        data, addr = sock.recvfrom(1024)
+        while True:
 
-        msg = data.decode()
+            data, addr = sock.recvfrom(1024)
+            msg = data.decode().strip()
 
-        if msg.startswith("PRIMARY_HERE"):
-            return addr
+            # ignora o próprio broadcast
+            if addr[0] == obter_ip_local():
+                continue
+
+            if msg.startswith("PRIMARY_HERE"):
+                print("Líder encontrado:", addr)
+                return addr
 
     except socket.timeout:
-        pass
-  
-    finally:
-      sock.settimeout(None)
+        return None
 
-    return None
+    finally:
+        sock.settimeout(None)
 
 
 def enviar_members_update(sock, members, meu_id, next_id):

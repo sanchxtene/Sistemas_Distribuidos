@@ -7,6 +7,7 @@ from print_servidor import imprimir_inicializacao
 from cluster import descobrir_lider, desserializar_clientes
 from loops import cluster_loop, processamento_loop
 from estado import ServidorState
+from obter_ip_maquina import obter_ip_local
 
 # Configuração da porta servidor passada por parâmetro
 if len(sys.argv) < 2:
@@ -14,43 +15,36 @@ if len(sys.argv) < 2:
     exit()
 porta = int(sys.argv[1])
 
-BROADCAST_IP = '255.255.255.255'
-
 # clientes
 service_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-service_sock.bind(('', porta))
+service_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+service_sock.bind(("", porta))
+
 
 # comunicação entre servidores
 cluster_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 cluster_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-cluster_sock.bind(('', porta + 100))
-
-print(f"Servidor rodando na porta {porta}")
-print(f"Cluster na porta {porta+100}")
+cluster_sock.bind(("", porta + 100))
 
 estado = ServidorState()
 
 lider = descobrir_lider(cluster_sock, porta + 100)
 
-
 if lider is None:
 
     estado.rm_id = 1
-    estado.role = "PRIMARY"
-
-    estado.next_id = 2
-
     estado.primary_id = estado.rm_id
-    estado.primary_addr = (socket.gethostbyname(socket.gethostname()), porta)
+    estado.next_id = 2
+    estado.role = "PRIMARY"
+    
+    estado.primary_addr = (obter_ip_local(), porta)
 
-    estado.members[estado.rm_id] = estado.primary_addr
-
-    print(f"RM {estado.rm_id} iniciado como PRIMARY")
+    estado.members[estado.rm_id] = (obter_ip_local(), porta + 100)
 
 else:
     cluster_sock.settimeout(2)
 
-    # Mensagem de JOIN ao Líder
+    # Envia mensagem de JOIN ao Líder
     resposta = f"JOIN"
     cluster_sock.sendto(resposta.encode(), lider)
 
@@ -63,9 +57,7 @@ else:
                 f"Mensagem inesperada: {msg}"
             )
 
-        payload = json.loads(
-            msg[len("CLUSTER|"):]
-        )
+        payload = json.loads(msg[len("CLUSTER|"):])
 
         estado.rm_id = payload["rm_id"]
         estado.primary_id = payload["primary_id"]
@@ -79,13 +71,9 @@ else:
 
         estado.req_global = payload["req_global"]
 
-        estado.total = np.uint64(
-            payload["total"]
-        )
+        estado.total = np.uint64(payload["total"])
 
-        estado.tabela_clientes = desserializar_clientes(
-            payload["clientes"]
-        )
+        estado.tabela_clientes = desserializar_clientes(payload["clientes"])
 
         estado.tabela_servidor["num_reqs"] = estado.req_global
         estado.tabela_servidor["total_sum"] = estado.total
@@ -93,14 +81,6 @@ else:
         estado.role = "BACKUP"
 
         estado.primary_addr = lider
-
-        print(
-            f"RM {estado.rm_id} iniciado como BACKUP "
-            f"(lider={estado.primary_id})"
-        )
-
-        print("MEMBERS:")
-        print(estado.members)
 
     except socket.timeout:
         print("Falha ao entrar no cluster")

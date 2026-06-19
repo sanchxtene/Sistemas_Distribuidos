@@ -45,11 +45,6 @@ def conectar_com_servidor(client_socket):
                 SERVER_IP = payload["ip"]
                 SERVER_PORT = payload["porta"]
 
-            print(
-                f"Conectado ao líder "
-                f"{SERVER_IP}:{SERVER_PORT}"
-            )
-
             return  # sucesso → sai do loop
 
         except socket.timeout:
@@ -308,7 +303,7 @@ def receive_thread(sock):
 
         except socket.timeout:
             print("TIMEOUT!")
-            
+       
         except ConnectionResetError:
             print(
                 "Servidor indisponível. "

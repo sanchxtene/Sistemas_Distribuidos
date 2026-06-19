@@ -1,16 +1,14 @@
 import json
 import numpy as np
-import socket
 from cluster import enviar_members_update, replicar_estado, desserializar_clientes, serializar_clientes
 from print_servidor import imprimir_duplicada, imprimir_requisicao, retorno_requisicao
-
+from obter_ip_maquina import obter_ip_local
    
 def cluster_loop(cluster_sock, estado):
   while True:
 
     try:
       data, addr = cluster_sock.recvfrom(1024)
-
       msg = data.decode()
 
       # UPDATE BACKUPS 
@@ -27,11 +25,6 @@ def cluster_loop(cluster_sock, estado):
               for k, v in payload["members"].items()
             }
             estado.next_id = payload["next_id"]
-
-          print("MEMBERS atualizado:")
-          print(estado.members)
-          print(estado.next_id)
-
           continue
 
         # UPDATE BACKUPS
@@ -48,11 +41,6 @@ def cluster_loop(cluster_sock, estado):
 
               estado.tabela_servidor["num_reqs"] = estado.req_global
               estado.tabela_servidor["total_sum"] = estado.total
-
-          print(
-            f"[RM {estado.rm_id}] Estado atualizado: "
-            f"reqs={estado.req_global} total={estado.total}"
-          )
 
           print("\n=== ESTADO BACKUP ===")
           print("req_global =", estado.req_global)
@@ -71,7 +59,6 @@ def cluster_loop(cluster_sock, estado):
       # DISCOVERY SERVIDOR
       elif msg == "RM_DISCOVERY":
         if estado.role == "PRIMARY":
-          print(f"RM_DISCOVERY recebido de {addr}")
           resposta = (f"PRIMARY_HERE|{estado.rm_id}")
           cluster_sock.sendto(resposta.encode(), addr)
 
@@ -99,14 +86,11 @@ def cluster_loop(cluster_sock, estado):
             }
 
           resposta = f"CLUSTER|{json.dumps(payload)}"
-
           cluster_sock.sendto(resposta.encode(), addr)
-
           enviar_members_update(cluster_sock, estado.members, estado.rm_id, estado.next_id)
 
     except Exception as e:
                 print("ERRO CLUSTER:", e)
-
 
 
 def processamento_loop(service_sock, cluster_sock, estado):
@@ -120,9 +104,9 @@ def processamento_loop(service_sock, cluster_sock, estado):
       continue
 
     if msg == "DISCOVERY":
-
+  
       payload = {
-          "ip":  socket.gethostbyname(socket.gethostname()),
+          "ip":  obter_ip_local(),
           "porta": service_sock.getsockname()[1],
           "rm_id": estado.rm_id
       }
