@@ -3,9 +3,10 @@ import socket
 import numpy as np
 import threading
 import json
+import time
 from print_servidor import imprimir_inicializacao
 from cluster import descobrir_lider, desserializar_clientes
-from loops import cluster_loop, processamento_loop
+from loops import cluster_loop, heartbeat_loop, processamento_loop
 from estado import ServidorState
 
 # Configuração da porta servidor passada por parâmetro
@@ -29,6 +30,7 @@ print(f"Servidor rodando na porta {porta}")
 print(f"Cluster na porta {porta+100}")
 
 estado = ServidorState()
+estado.service_addr = (socket.gethostbyname(socket.gethostname()), porta)
 
 lider = descobrir_lider(cluster_sock, porta + 100)
 
@@ -41,9 +43,10 @@ if lider is None:
     estado.next_id = 2
 
     estado.primary_id = estado.rm_id
-    estado.primary_addr = (socket.gethostbyname(socket.gethostname()), porta)
+    estado.primary_addr = estado.service_addr
 
     estado.members[estado.rm_id] = estado.primary_addr
+    estado.last_heartbeat = time.monotonic()
 
     print(f"RM {estado.rm_id} iniciado como PRIMARY")
 
@@ -93,6 +96,7 @@ else:
         estado.role = "BACKUP"
 
         estado.primary_addr = lider
+        estado.last_heartbeat = time.monotonic()
 
         print(
             f"RM {estado.rm_id} iniciado como BACKUP "
@@ -120,6 +124,15 @@ cluster_thread = threading.Thread(
     daemon=True
 )
 
+heartbeat_thread = threading.Thread(
+    target=heartbeat_loop,
+    args=(
+        cluster_sock,
+        estado,
+    ),
+    daemon=True
+)
+
 processamento_thread = threading.Thread(
     target=processamento_loop,
     args=(
@@ -131,6 +144,7 @@ processamento_thread = threading.Thread(
 )
 
 cluster_thread.start()
+heartbeat_thread.start()
 processamento_thread.start()
 
 cluster_thread.join()

@@ -50,7 +50,9 @@ def conectar_com_servidor(client_socket):
                 f"{SERVER_IP}:{SERVER_PORT}"
             )
 
-            return  # sucesso → sai do loop
+            client_socket.settimeout(None)
+
+            return SERVER_IP, SERVER_PORT
 
         except socket.timeout:
             # Servidor não respondeu
@@ -307,7 +309,7 @@ def receive_thread(sock):
             print("Mensagem inesperada:", resposta)
 
         except socket.timeout:
-            print("TIMEOUT!")
+            continue
             
         except ConnectionResetError:
             print(

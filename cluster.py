@@ -3,6 +3,8 @@ import json
 import numpy as np
 
 BROADCAST_IP = '255.255.255.255'
+CLUSTER_MIN_SCAN = 5
+CLUSTER_MAX_SCAN = 20
 
 # Cria um json para passar a tabela de clientes por mensagem
 def serializar_clientes(tabela_clientes):
@@ -39,22 +41,31 @@ def desserializar_clientes(clientes_json):
 
 def descobrir_lider(sock, cluster_port):
     try:
-        sock.settimeout(2)
+        sock.settimeout(0.3)
 
-        sock.sendto(b"RM_DISCOVERY", (BROADCAST_IP, cluster_port))
+        inicio = max(1, cluster_port - CLUSTER_MIN_SCAN)
+        fim = cluster_port + CLUSTER_MAX_SCAN
 
-        data, addr = sock.recvfrom(1024)
+        for porta in range(inicio, fim + 1):
+            sock.sendto(b"RM_DISCOVERY", (BROADCAST_IP, porta))
 
-        msg = data.decode()
+        # janela curta para receber a primeira resposta de um PRIMARY
+        for _ in range(10):
+            try:
+                data, addr = sock.recvfrom(1024)
+            except socket.timeout:
+                continue
 
-        if msg.startswith("PRIMARY_HERE"):
-            return addr
+            msg = data.decode()
+
+            if msg.startswith("PRIMARY_HERE"):
+                return addr
 
     except socket.timeout:
         pass
-  
+
     finally:
-      sock.settimeout(None)
+        sock.settimeout(None)
 
     return None
 
@@ -102,5 +113,10 @@ def replicar_estado(sock, members, meu_id, req_global, total, tabela_clientes):
 
         except Exception as e:
             print(f"Erro ao replicar para RM {rm_id}: {e}")
+
+
+def adicionar_endereco_cluster(addr, cluster_port):
+    ip, porta = addr
+    return (ip, cluster_port)
 
 
