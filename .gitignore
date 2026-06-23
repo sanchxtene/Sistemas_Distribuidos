@@ -1,1 +1,22 @@
-*.pyc
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Environments (Virtual Environments)
+.venv/
+venv/
+ENV/
+
+# Secrets and local configurations
+.env
+*.secret
+db.sqlite3
+
+# IDEs and Code Editors
+.vscode/
+.idea/

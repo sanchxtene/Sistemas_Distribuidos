@@ -12,6 +12,7 @@ class ServidorState:
         self.primary_addr = None
         self.next_id = None
         self.service_addr = None
+        self.cluster_addr = None
 
         self.members = {}
 

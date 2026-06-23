@@ -5,14 +5,24 @@ import time
 
 import numpy as np
 
-from cluster import desserializar_clientes, enviar_members_update, replicar_estado, serializar_clientes
+from cluster import (
+    desserializar_clientes,
+    enviar_members_update,
+    replicar_delta,
+    serializar_clientes,
+)
 from print_servidor import imprimir_duplicada, imprimir_requisicao, retorno_requisicao
 
 
 HEARTBEAT_INTERVAL = 1.0
 HEARTBEAT_TIMEOUT = 3.0
 ELECTION_WAIT_TIMEOUT = 1.0
+MONITOR_INTERVAL = 0.5
 
+
+# ---------------------------------------------------------------------------
+# Helpers de cluster
+# ---------------------------------------------------------------------------
 
 def _snapshot_members(estado):
     with estado.membership_lock:
@@ -24,14 +34,14 @@ def _cluster_message(payload):
 
 
 def _send_to_members(sock, members, meu_id, payload):
-    msg = _cluster_message(payload)
+    """Envia uma mensagem de cluster a todos os membros (menos a si mesmo)."""
+    msg = _cluster_message(payload).encode()
 
     for rm_id, addr in members.items():
         if rm_id == meu_id:
             continue
-
         try:
-            sock.sendto(msg.encode(), addr)
+            sock.sendto(msg, addr)
         except Exception:
             pass
 
@@ -40,6 +50,7 @@ def _anunciar_lider(cluster_sock, estado):
     payload = {
         "type": "COORDINATOR",
         "leader_id": estado.rm_id,
+        # primary_addr e sempre o endereco de SERVICO (porta de clientes)
         "leader_addr": list(estado.primary_addr or estado.service_addr),
     }
     _send_to_members(cluster_sock, _snapshot_members(estado), estado.rm_id, payload)
@@ -54,6 +65,10 @@ def _atualizar_lider(estado, leader_id, leader_addr):
             estado.role = "BACKUP"
 
 
+# ---------------------------------------------------------------------------
+# Eleicao (algoritmo Bully)
+# ---------------------------------------------------------------------------
+
 def _iniciar_eleicao(cluster_sock, estado):
     with estado.membership_lock:
         if estado.election_in_progress:
@@ -62,25 +77,26 @@ def _iniciar_eleicao(cluster_sock, estado):
 
     try:
         estado.election_ok_event.clear()
+
         higher_members = {
             rm_id: addr
             for rm_id, addr in _snapshot_members(estado).items()
             if rm_id > estado.rm_id
         }
 
-        _send_to_members(
-            cluster_sock,
-            higher_members,
-            estado.rm_id,
-            {
-                "type": "ELECTION",
-                "candidate_id": estado.rm_id,
-            },
-        )
+        if higher_members:
+            _send_to_members(
+                cluster_sock,
+                higher_members,
+                estado.rm_id,
+                {"type": "ELECTION", "candidate_id": estado.rm_id},
+            )
 
-        if estado.election_ok_event.wait(timeout=ELECTION_WAIT_TIMEOUT):
-            return
+            # Se algum RM com id maior responde OK, ele assume a eleicao.
+            if estado.election_ok_event.wait(timeout=ELECTION_WAIT_TIMEOUT):
+                return
 
+        # Ninguem maior respondeu: este RM vira o lider.
         with estado.state_lock:
             estado.role = "PRIMARY"
             estado.primary_id = estado.rm_id
@@ -95,7 +111,12 @@ def _iniciar_eleicao(cluster_sock, estado):
             estado.election_in_progress = False
 
 
+# ---------------------------------------------------------------------------
+# Threads de cluster
+# ---------------------------------------------------------------------------
+
 def heartbeat_loop(cluster_sock, estado):
+    """Lider envia heartbeats periodicos aos backups."""
     while True:
         time.sleep(HEARTBEAT_INTERVAL)
 
@@ -114,231 +135,256 @@ def heartbeat_loop(cluster_sock, estado):
         )
 
 
-def cluster_loop(cluster_sock, estado):
-    while True:
+def monitor_loop(cluster_sock, estado):
+    """Backup detecta a falha do lider e dispara eleicao.
 
+    Roda em thread separada para nao depender de timeout no recvfrom do
+    cluster_loop (que fica bloqueado a maior parte do tempo).
+    """
+    while True:
+        time.sleep(MONITOR_INTERVAL)
+
+        if estado.role != "BACKUP":
+            continue
+
+        if time.monotonic() - estado.last_heartbeat > HEARTBEAT_TIMEOUT:
+            _iniciar_eleicao(cluster_sock, estado)
+
+
+def cluster_loop(cluster_sock, estado):
+    """Trata todo o trafego RM<->RM: membership, replicacao e eleicao."""
+    while True:
         try:
-            data, addr = cluster_sock.recvfrom(1024)
+            data, addr = cluster_sock.recvfrom(65535)
             msg = data.decode()
 
-            # UPDATE BACKUPS
             if msg.startswith("CLUSTER|"):
                 payload = json.loads(msg[len("CLUSTER|"):])
+                tipo = payload["type"]
 
-                if payload["type"] == "MEMBERS_UPDATE":
-
+                if tipo == "MEMBERS_UPDATE":
                     with estado.membership_lock:
                         estado.members = {
                             int(k): tuple(v)
                             for k, v in payload["members"].items()
                         }
                         estado.next_id = payload["next_id"]
-
-                    print("MEMBERS atualizado:")
-                    print(estado.members)
-                    print(estado.next_id)
-
                     continue
 
-                elif payload["type"] == "STATE_UPDATE":
+                if tipo == "STATE_FULL":
+                    # Snapshot completo (usado em sincronizacao inicial).
+                    with estado.state_lock:
+                        estado.req_global = payload["req_global"]
+                        estado.total = np.uint64(payload["total"])
+                        estado.tabela_clientes = desserializar_clientes(payload["clientes"])
+                        estado.tabela_servidor["num_reqs"] = estado.req_global
+                        estado.tabela_servidor["total_sum"] = estado.total
+                    continue
+
+                if tipo == "STATE_DELTA":
+                    # Replicacao incremental: aplica uma requisicao processada
+                    # pelo primario. Idempotente por (cliente, id_req).
+                    cli = tuple(payload["client"])
+                    id_req = payload["id_req"]
+                    numero = np.uint64(payload["value"])
 
                     with estado.state_lock:
+                        dados = estado.tabela_clientes.get(cli)
+                        if dados is None:
+                            dados = {
+                                "last_req": 0,
+                                "last_num_reqs": 0,
+                                "last_total_sum": np.uint64(0),
+                            }
+                            estado.tabela_clientes[cli] = dados
 
-                            estado.req_global = payload["req_global"]
-                            estado.total = np.uint64(payload["total"])
-
-                            estado.tabela_clientes = (
-                                    desserializar_clientes(payload["clientes"])
-                            )
-
+                        # Aplica somente se for a proxima requisicao esperada.
+                        if id_req == dados["last_req"] + 1:
+                            estado.total += numero
+                            estado.req_global += 1
+                            dados["last_req"] = id_req
+                            dados["last_num_reqs"] += 1
+                            dados["last_total_sum"] = estado.total
                             estado.tabela_servidor["num_reqs"] = estado.req_global
                             estado.tabela_servidor["total_sum"] = estado.total
-
-                    print(
-                        f"[RM {estado.rm_id}] Estado atualizado: "
-                        f"reqs={estado.req_global} total={estado.total}"
-                    )
-
-                    print("\n=== ESTADO BACKUP ===")
-                    print("req_global =", estado.req_global)
-                    print("total =", estado.total)
-                    for addr, dados in estado.tabela_clientes.items():
-                            print(
-                                    f"cliente={addr[0]}:{addr[1]} | "
-                                    f"last_req={dados['last_req']} | "
-                                    f"num_reqs={dados['last_num_reqs']} | "
-                                    f"total_sum={dados['last_total_sum']}"
-                            )
-                    print("=====================\n")
-
                     continue
 
-                elif payload["type"] == "HEARTBEAT":
+                if tipo == "HEARTBEAT":
                     _atualizar_lider(estado, payload["leader_id"], payload["leader_addr"])
                     continue
 
-                elif payload["type"] == "OK":
+                if tipo == "OK":
                     estado.election_ok_event.set()
                     continue
 
-                elif payload["type"] == "COORDINATOR":
+                if tipo == "COORDINATOR":
                     _atualizar_lider(estado, payload["leader_id"], payload["leader_addr"])
                     estado.election_ok_event.clear()
                     with estado.membership_lock:
                         estado.election_in_progress = False
-                    print(f"[RM {estado.rm_id}] Novo líder eleito: RM {estado.primary_id}")
+                    print(f"[RM {estado.rm_id}] Novo lider eleito: RM {estado.primary_id}")
                     continue
 
-                elif payload["type"] == "ELECTION":
+                if tipo == "ELECTION":
                     candidato_id = payload["candidate_id"]
                     if estado.rm_id > candidato_id:
-                        cluster_sock.sendto(_cluster_message({"type": "OK", "from_id": estado.rm_id}).encode(), addr)
+                        cluster_sock.sendto(
+                            _cluster_message({"type": "OK", "from_id": estado.rm_id}).encode(),
+                            addr,
+                        )
                         if estado.role == "PRIMARY":
                             _anunciar_lider(cluster_sock, estado)
                         else:
-                            threading.Thread(target=_iniciar_eleicao, args=(cluster_sock, estado), daemon=True).start()
+                            threading.Thread(
+                                target=_iniciar_eleicao,
+                                args=(cluster_sock, estado),
+                                daemon=True,
+                            ).start()
                     continue
 
-            # DISCOVERY SERVIDOR
             elif msg == "RM_DISCOVERY":
                 if estado.role == "PRIMARY":
-                    print(f"RM_DISCOVERY recebido de {addr}")
-                    resposta = (f"PRIMARY_HERE|{estado.rm_id}")
+                    resposta = f"PRIMARY_HERE|{estado.rm_id}"
                     cluster_sock.sendto(resposta.encode(), addr)
 
-            # JOIN NOVO SERVIDOR
             elif msg == "JOIN":
+                if estado.role != "PRIMARY":
+                    continue
                 with estado.membership_lock:
                     novo_id = estado.next_id
+                    # addr e o endereco de cluster do novo RM (ja correto).
                     estado.members[novo_id] = addr
                     estado.next_id += 1
+                    membros_snapshot = dict(estado.members)
+                    next_id_atual = estado.next_id
 
-                    with estado.state_lock:
-                        payload = {
-                                "type": "JOIN_ACK",
-                                "rm_id": novo_id,
-                                "primary_id": estado.primary_id,
-                                "members": dict(estado.members),
-                                "next_id": estado.next_id,
+                with estado.state_lock:
+                    payload = {
+                        "type": "JOIN_ACK",
+                        "rm_id": novo_id,
+                        "primary_id": estado.primary_id,
+                        "primary_addr": list(estado.primary_addr),
+                        "members": membros_snapshot,
+                        "next_id": next_id_atual,
+                        "req_global": estado.req_global,
+                        "total": int(estado.total),
+                        "clientes": serializar_clientes(estado.tabela_clientes),
+                    }
 
-                                # estado atual do sistema
-                                "req_global": estado.req_global,
-                                "total": int(estado.total),
-                                "clientes": serializar_clientes(
-                                        estado.tabela_clientes
-                                )
-                        }
-
-                    resposta = f"CLUSTER|{json.dumps(payload)}"
-
-                    cluster_sock.sendto(resposta.encode(), addr)
-
-                    enviar_members_update(cluster_sock, estado.members, estado.rm_id, estado.next_id)
-
-        except socket.timeout:
-            if estado.role == "BACKUP" and (time.monotonic() - estado.last_heartbeat > HEARTBEAT_TIMEOUT):
-                _iniciar_eleicao(cluster_sock, estado)
+                cluster_sock.sendto(_cluster_message(payload).encode(), addr)
+                enviar_members_update(cluster_sock, membros_snapshot, estado.rm_id, next_id_atual)
 
         except Exception as e:
-                                print("ERRO CLUSTER:", e)
+            print("ERRO CLUSTER:", e)
 
+
+# ---------------------------------------------------------------------------
+# Processamento de requisicoes dos clientes
+# ---------------------------------------------------------------------------
 
 def processamento_loop(service_sock, cluster_sock, estado):
+    """Recebe requisicoes dos clientes, soma ao acumulador e responde com ACK.
+
+    Caminho quente: mantido enxuto para suportar grande volume de requisicoes.
+    """
     while True:
-        # Mensagem recebida pelo servidor
-        data, addr = service_sock.recvfrom(1024)
+        data, addr = service_sock.recvfrom(2048)
 
-        msg = data.decode()
-
+        # Somente o primario processa requisicoes de clientes.
         if estado.role != "PRIMARY":
             continue
 
+        try:
+            msg = data.decode()
+        except Exception:
+            continue
+
+        # --- Descoberta (unicast de resposta ao broadcast do cliente) ---
         if msg == "DISCOVERY":
-
             payload = {
-                    "ip":  socket.gethostbyname(socket.gethostname()),
-                    "porta": service_sock.getsockname()[1],
-                    "rm_id": estado.rm_id
+                "ip": estado.service_addr[0],
+                "porta": estado.service_addr[1],
+                "rm_id": estado.rm_id,
             }
-
             service_sock.sendto(json.dumps(payload).encode(), addr)
-
             continue
 
         if msg == "EXIT":
             continue
 
-        if "|" not in msg:
-            print("Mensagem inesperada no processamento:", msg)
+        sep = msg.find('|')
+        if sep == -1:
             continue
 
         try:
-            with estado.state_lock:
-                if addr not in estado.tabela_clientes:
-                    estado.tabela_clientes[addr] = {
-                            "last_req": 0,
-                            "last_num_reqs": 0,
-                            "last_total_sum": np.uint64(0)
-                    }
+            id_req_user = int(msg[:sep])
+            numero = int(msg[sep + 1:])
+        except ValueError:
+            continue
 
-            # formato: req_id|numero
-            id_req_user, numero = msg.split('|', 1)
-            id_req_user = int(id_req_user)
-            numero = int(numero)
+        with estado.state_lock:
+            dados = estado.tabela_clientes.get(addr)
+            if dados is None:
+                dados = {
+                    "last_req": 0,
+                    "last_num_reqs": 0,
+                    "last_total_sum": np.uint64(0),
+                }
+                estado.tabela_clientes[addr] = dados
 
-            # Consulta tabela para ver o id da última requisição do cliente
-            id_ultima_requisicao = estado.tabela_clientes[addr]["last_req"]
-            id_requisicao_esperada = id_ultima_requisicao + 1 
+            esperada = dados["last_req"] + 1
 
-            # mensagem duplicada
-            if id_req_user < id_requisicao_esperada:
-                imprimir_duplicada(estado.tabela_clientes, addr, numero)
-                continue
-      
-            # mensagem fora de ordem, se for maior que id esperado alguma mensagem se perdeu no caminho
-            elif id_req_user > id_requisicao_esperada: 
-                """
-                        Por outro lado, caso o servidor receba uma mensagem do cliente com um número de identificação superior ao
-                próximo identificador esperado, o servidor deverá responder a requisição com uma mensagem de ACK com o
-                último número de identificação de requisição recebida e processada, indicando assim que alguma requisição
-                anterior foi perdida.
-                """
-                resposta = f"{id_ultima_requisicao}"
-                service_sock.sendto(resposta.encode(), addr)
-                continue
+            if id_req_user < esperada:
+                # Duplicata: reexibe e reenvia o ACK da ultima requisicao
+                # processada deste cliente (last_*).
+                num_reqs_cli = dados["last_num_reqs"]
+                total_cli = dados["last_total_sum"]
+                last_req = dados["last_req"]
+                global_reqs = estado.req_global
+                global_total = estado.total
+                acao = "DUP"
 
-            # soma ao acumulador e incrementa contador de requisições
-            with estado.state_lock:
+            elif id_req_user > esperada:
+                # Lacuna: alguma requisicao anterior se perdeu. Responde com o
+                # ultimo id processado para o cliente retransmitir.
+                acao = "GAP"
+                last_proc = dados["last_req"]
 
+            else:
+                # Proxima requisicao esperada: processa.
                 estado.total += np.uint64(numero)
                 estado.req_global += 1
 
-                req_global = estado.req_global
-                total = estado.total
+                dados["last_req"] = id_req_user
+                dados["last_num_reqs"] += 1
+                dados["last_total_sum"] = estado.total
 
                 estado.tabela_servidor["num_reqs"] = estado.req_global
                 estado.tabela_servidor["total_sum"] = estado.total
 
-                # Atualizar tabela clientes
-                estado.tabela_clientes[addr]["last_req"] = id_req_user
-                estado.tabela_clientes[addr]["last_num_reqs"] = estado.req_global
-                estado.tabela_clientes[addr]["last_total_sum"] = estado.total
+                global_reqs = estado.req_global
+                global_total = estado.total
+                acao = "OK"
 
-            with estado.membership_lock:
-                members = dict(estado.members)
+        # --- Fora do lock: I/O de rede e impressao ---
 
-            replicar_estado(cluster_sock, members, estado.rm_id, req_global, total, estado.tabela_clientes)
-
-            # Envia ACK ao cliente
-            imprimir_requisicao(estado.tabela_clientes, addr, numero)
-            resposta = retorno_requisicao(estado.tabela_clientes, addr, numero)
-
+        if acao == "DUP":
+            imprimir_duplicada(addr, last_req, numero, global_reqs, global_total)
+            resposta = retorno_requisicao(last_req, numero, num_reqs_cli, total_cli)
             service_sock.sendto(resposta.encode(), addr)
+            continue
 
-            print("\n=== CLIENTES PRIMARY ===")
-            for addr, dados in estado.tabela_clientes.items():
-                    print(addr, dados)
-            print("========================\n")
+        if acao == "GAP":
+            service_sock.sendto(str(last_proc).encode(), addr)
+            continue
 
-        except Exception as e:
-            print("ERRO PROCESSAMENTO:", e)
+        # acao == "OK"
+        # Replicacao incremental best-effort aos backups. Em servidor unico
+        # (members so contem a si proprio) nao ha custo de rede.
+        membros = _snapshot_members(estado)
+        if len(membros) > 1:
+            replicar_delta(cluster_sock, membros, estado.rm_id, addr, id_req_user, numero)
+
+        imprimir_requisicao(addr, id_req_user, numero, global_reqs, global_total)
+        resposta = retorno_requisicao(id_req_user, numero, global_reqs, global_total)
+        service_sock.sendto(resposta.encode(), addr)

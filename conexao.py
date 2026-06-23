@@ -1,330 +1,169 @@
 import socket
-import signal
-import sys
-import queue
 import threading
 import json
 import time
 import traceback
-from print_cliente import imprimir_retorno
+
+from print_cliente import imprimir_conexao, imprimir_retorno
 
 BROADCAST_IP = '255.255.255.255'
 
-max_tentativas = 3
+# Timeout de retransmissao. A especificacao sugere ~3x RTT da rede local ou
+# 10 ms. Em rede local 10 ms e adequado; aumente se houver muita perda.
+RETRY_TIMEOUT = 0.010
+DISCOVERY_TIMEOUT = 1.0
+DISCOVERY_TENTATIVAS = 3
 
+# Estado compartilhado entre as threads do cliente.
 running = True
-client_sock = None
-SERVER_IP_global = None
-SERVER_PORT_global = None
-
-acks  = {}
-historico = {}
-lock = threading.Lock()
-
-# fila de pedidos de retransmissão
-retransmit_queue = queue.Queue()
-
 leader_lock = threading.Lock()
+SERVER_IP = None
+SERVER_PORT = None
+
+# Sincronizacao envio <-> recepcao. Como o cliente mantem no maximo uma
+# requisicao em voo, basta um unico evento e o id confirmado mais recente.
+_ack_lock = threading.Lock()
+_ack_event = threading.Event()
+_ack_em_voo = None        # id_req aguardando confirmacao
+_ultimo_confirmado = 0    # maior id confirmado pelo servidor
 
 
-def conectar_com_servidor(client_socket):
-    tentativa = 0
+def _destino():
+    with leader_lock:
+        return (SERVER_IP, SERVER_PORT)
 
-    global SERVER_IP
-    global SERVER_PORT
 
-    while tentativa < max_tentativas:
+def conectar_com_servidor(client_socket, porta_descoberta):
+    """Fase de descoberta: faz broadcast e aguarda o unicast do servidor.
+
+    Retorna (ip, porta) do servidor ou None apos esgotar as tentativas.
+    """
+    global SERVER_IP, SERVER_PORT
+
+    for tentativa in range(1, DISCOVERY_TENTATIVAS + 1):
         try:
-            client_socket.settimeout(1)
-            # Servidor responde com o endereço IP
-            data, addr = client_socket.recvfrom(1024)
+            client_socket.settimeout(DISCOVERY_TIMEOUT)
+            client_socket.sendto(b"DISCOVERY", (BROADCAST_IP, porta_descoberta))
 
+            data, _ = client_socket.recvfrom(1024)
             payload = json.loads(data.decode())
 
             with leader_lock:
                 SERVER_IP = payload["ip"]
                 SERVER_PORT = payload["porta"]
 
-            print(
-                f"Conectado ao líder "
-                f"{SERVER_IP}:{SERVER_PORT}"
-            )
-
             client_socket.settimeout(None)
-
+            imprimir_conexao(SERVER_IP)
             return SERVER_IP, SERVER_PORT
 
         except socket.timeout:
-            # Servidor não respondeu
-            tentativa += 1
-            print(f"Timeout... tentando conexão novamente ({tentativa}/{max_tentativas})")
-
-    # TODAS as tentativas falharam
-    print(f"Servidor não respondeu após {max_tentativas} tentativas")
-    return None 
-
-
-def reconectar(client_socket):
-    global SERVER_IP
-    global SERVER_PORT
-
-    print("Tentando localizar novo líder...")
-
-    while True:
-
-        try:
-            client_socket.sendto(b"DISCOVERY", (BROADCAST_IP, SERVER_PORT))
-
-            resultado = conectar_com_servidor(client_socket)
-
-            if resultado is None:
-                raise RuntimeError("Nenhum líder encontrado")
-
-            SERVER_IP, SERVER_PORT = resultado
-
-            print(
-                f"Novo líder encontrado: "
-                f"{SERVER_IP}:{SERVER_PORT}"
-            )
-
-            return SERVER_IP, SERVER_PORT
-
+            print(f"Timeout na descoberta ({tentativa}/{DISCOVERY_TENTATIVAS})")
         except Exception:
+            traceback.print_exc()
 
-            print(
-                "Nenhum líder disponível. "
-                "Tentando novamente..."
-            )
-
-            time.sleep(1)
+    print(f"Servidor nao respondeu apos {DISCOVERY_TENTATIVAS} tentativas")
+    client_socket.settimeout(None)
+    return None
 
 
-def encerrar_conexao(sig, frame):
-    global SERVER_IP
-    global SERVER_PORT
-    global running
+def reconectar(client_socket, porta_descoberta):
+    """Redescobre o lider (ex.: apos failover). Bloqueia ate encontrar um."""
+    global SERVER_IP, SERVER_PORT
 
-    print("\nEncerrando cliente...")
-    
-    running = False
-    
-    try:
-        if client_sock:
-            client_sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
-    except:
-        pass
-
-    signal.signal(signal.SIGINT, encerrar_conexao)
-
-
-
-
-def processar_retransmissoes(sock, SERVER_IP, SERVER_PORT):
-    """
-    Executado pelo input_thread.
-    Processa pedidos de reenvio vindos da função receive_thread.
-    """
-    while not retransmit_queue.empty():
-
-        faltante = retransmit_queue.get()
-
-        with lock:
-            msg = historico.get(faltante)
-
-        if msg:
-            sock.sendto(msg.encode(), (SERVER_IP, SERVER_PORT))
+    print("Procurando novo lider...")
+    while running:
+        if conectar_com_servidor(client_socket, porta_descoberta):
+            print(f"Novo lider: {SERVER_IP}:{SERVER_PORT}")
+            return SERVER_IP, SERVER_PORT
+        time.sleep(0.5)
+    return None
 
 
 def enviar_com_timeout(sock, req_id, numero):
+    """Envia uma requisicao e retransmite ate receber a confirmacao.
+
+    Garante exactly-once: o id so e dado por concluido quando o servidor o
+    confirma. Como ha no maximo uma requisicao em voo, o controle e simples.
     """
-    Executado pelo manual_input_thread ou automatic_input_thread.
-    Processa pedidos de envio utilizando timeout e várias tentativas caso necessário.
-    """
-    global SERVER_IP
-    global SERVER_PORT
+    global _ack_em_voo
 
-    mensagem = f"{req_id}|{numero}"
+    mensagem = f"{req_id}|{numero}".encode()
 
-    evento = threading.Event()
-
-    with lock:
-        acks[req_id] = evento
-        historico[req_id] = mensagem
-
-    for tentativa in range(max_tentativas):
-        with leader_lock:
-            destino = (SERVER_IP, SERVER_PORT)
-
-        sock.sendto(mensagem.encode(), destino)
-
-        if evento.wait(timeout=1):
-            with lock:
-                acks.pop(req_id,None)
+    with _ack_lock:
+        _ack_em_voo = req_id
+        _ack_event.clear()
+        # Se o servidor ja confirmou este id (ACK anterior), nao reenvia.
+        if _ultimo_confirmado >= req_id:
+            _ack_em_voo = None
             return True
 
-    reconectar(sock)
+    while running:
+        sock.sendto(mensagem, _destino())
+
+        # Acorda por confirmacao OU por sinal de lacuna; em ambos os casos
+        # checamos se ESTE id ja foi confirmado. Lacuna -> reenvia.
+        _ack_event.wait(timeout=RETRY_TIMEOUT)
+        with _ack_lock:
+            confirmado = _ultimo_confirmado >= req_id
+            _ack_event.clear()
+        if confirmado:
+            with _ack_lock:
+                _ack_em_voo = None
+            return True
+        # nao confirmado (timeout ou lacuna): reenvia
+
     return False
 
 
-def manual_input_thread(sock):
+def receive_thread(sock, client_socket, porta_descoberta):
+    """Escuta as respostas do servidor e libera o envio da proxima requisicao.
+
+    - ACK normal (8 tokens): confirma o id e imprime a resposta.
+    - ACK de lacuna (1 token = ultimo id processado): acorda o emissor para
+      retransmitir imediatamente, sem esperar o timeout.
     """
-    Executada por cliente.py
-    Recebe entradas do usuário pelo teclado e utiliza a função enviar_com_timeout para envia-las ao servidor.
-    """
-    global running
-    global client_sock 
-    global SERVER_IP
-    global SERVER_PORT
-
-    req_id = 0
-
-    try:
-        while running:
-            # antes de nova requisição,
-            # verifica se servidor pediu reenvio
-            processar_retransmissoes(sock, SERVER_IP, SERVER_PORT)
-
-            entrada = input()
-
-            numero = int(entrada)
-            req_id += 1
-
-            ok = enviar_com_timeout(sock, req_id, numero)
-
-            if not ok:
-                running = False
-                break
-
-    except EOFError:
-        print("\nEOF recebido. Encerrando...")
-        sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
-        running = False
-    
-    except KeyboardInterrupt:
-        print("\nCTRL+C recebido. Encerrando...")
-        sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
-        running = False
-
-    except Exception as e:
-        traceback.print_exc()
-
-
-def automatic_input_thread(sock, caminho_arquivo):
-    """
-    Executada por cliente.py
-    Recebe entradas vinda de um arquivo e utiliza a função enviar_com_timeout para envia-las ao servidor.
-    """
-    global running
-    global client_sock 
-    global SERVER_IP
-    global SERVER_PORT
-    
-    req_id = 0
-
-    try:
-        with open(caminho_arquivo) as f:
-            for linha in f:
-                if not running:
-                    break
-
-                # antes de nova requisição,
-                # verifica se servidor pediu reenvio
-                processar_retransmissoes(sock, SERVER_IP, SERVER_PORT)
-
-                linha = linha.strip()
-
-                if not linha:
-                    continue
-
-                numero = int(linha)
-                req_id += 1
-
-                ok = enviar_com_timeout(sock, req_id, numero)
-
-                if not ok:
-                    running = False
-                    break
-
-            print("\nEOF recebido. Encerrando...")
-            #sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
-            #running = False
-    
-    except EOFError:
-        print("\nEOF recebido. Encerrando...")
-        #sock.sendto(b"EXIT", (SERVER_IP, SERVER_PORT))
-        #running = False
-
-    except Exception as e:
-        traceback.print_exc()
-
-
-
-def receive_thread(sock):
-    """
-    Executada por cliente.py
-    Responsável por ficar "escutando" o retorno do servidor
-    Caso o servidor detecte a perda de uma mensagem deve adicionar
-    o id da mensagem faltante para ser enviada novamente
-    """
-    global running
-    global SERVER_IP
-    global SERVER_PORT
+    global running, SERVER_IP, SERVER_PORT, _ultimo_confirmado
 
     while running:
         try:
-            resposta, server = sock.recvfrom(1024)
-            resposta = resposta.decode().strip()
-            partes = resposta.split()
+            data, server = sock.recvfrom(1024)
+            partes = data.decode().split()
 
-            ##########################################
-            # servidor detectou perda
-            ##########################################
-            if len(partes) == 1:
-
-                ultimo_confirmado = int(partes[0])
-                faltante = ultimo_confirmado + 1
-
-                # não reenvia aqui
-                # só sinaliza para input_thread
-                retransmit_queue.put(faltante)
-
-                continue
-
-            ##########################################
-            # resposta normal
-            ##########################################
+            # Resposta normal de processamento.
             if len(partes) == 8:
+                req_id = int(partes[1])
+                value = partes[3]
+                num_reqs = partes[5]
+                total_sum = partes[7]
 
-                _, id_req, _, value, _, num_reqs, _, total_sum = partes
-                req_id = int(id_req)
+                with _ack_lock:
+                    if req_id > _ultimo_confirmado:
+                        _ultimo_confirmado = req_id
+                    if _ack_em_voo == req_id:
+                        _ack_event.set()
 
-                with lock:
-                    historico.pop(req_id, None)
-                    if req_id in acks:
-                        acks[req_id].set()
-
-                imprimir_retorno(server[0], id_req, value, num_reqs, total_sum)
+                imprimir_retorno(server[0], req_id, value, num_reqs, total_sum)
                 continue
 
-            print("Mensagem inesperada:", resposta)
+            # ACK de lacuna: servidor informa o ultimo id que processou.
+            if len(partes) == 1:
+                ultimo = int(partes[0])
+                with _ack_lock:
+                    if ultimo > _ultimo_confirmado:
+                        _ultimo_confirmado = ultimo
+                    # Acorda o emissor para reenviar a requisicao em voo.
+                    _ack_event.set()
+                continue
 
         except socket.timeout:
             continue
-            
         except ConnectionResetError:
-            print(
-                "Servidor indisponível. "
-                "Procurando novo líder..."
-            )
-
-            novo_ip, nova_porta = reconectar(sock)
-
-            with leader_lock:
-                SERVER_IP = novo_ip
-                SERVER_PORT = nova_porta
-
+            novo = reconectar(client_socket, porta_descoberta)
+            if novo:
+                with leader_lock:
+                    SERVER_IP, SERVER_PORT = novo
             continue
-
-        except Exception as e:
-            traceback.print_exc()
+        except Exception:
+            if running:
+                traceback.print_exc()
             break

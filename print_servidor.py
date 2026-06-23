@@ -1,39 +1,45 @@
 import datetime
 
-# Informa que o sevidor foi inicializado
-def imprimir_inicializacao(tabela):
-    time = datetime.datetime.now()
-    time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{time_str} "
-          f"num_reqs {tabela['num_reqs']} "
-          f"total_sum {tabela['total_sum']} ")
-         
-# Informa que o sevidor recebeu uma mensagem já processada
-def imprimir_duplicada(tabela, addr, numero):
-    time = datetime.datetime.now()
-    time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{time_str} "
-          f"client {str(addr[0])} "
-          f"DUP!! "
-          f"id_req {tabela[addr]['last_req']} "
-          f"value {numero} "
-          f"num_reqs {tabela[addr]['last_num_reqs']} "
-          f"total_sum {tabela[addr]['last_total_sum']} ")
-    
-# Informa que o sevidor recebeu uma mensagem nova e fez o seu processamento
-def imprimir_requisicao(tabela, addr, numero):
-    time = datetime.datetime.now()
-    time_str = time.strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{time_str} "
-           f"client {str(addr[0])} "
-           f"id_req {tabela[addr]['last_req']} "
-           f"value {numero} "
-           f"num_reqs {tabela[addr]['last_num_reqs']} "
-           f"total_sum {tabela[addr]['last_total_sum']} ")
 
-# Gera a mensagem que será enviada ao cliente
-def retorno_requisicao(tabela, addr, numero):
-    return(f"id_req {tabela[addr]['last_req']} "
-           f"value {numero} "
-           f"num_reqs {tabela[addr]['last_num_reqs']} "
-           f"total_sum {tabela[addr]['last_total_sum']} ")
+def _agora():
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+# Primeira linha obrigatoria apos iniciar o servidor:
+# "AAAA-MM-DD HH:MM:SS num_reqs 0 total_sum 0"
+def imprimir_inicializacao(tabela):
+    print(f"{_agora()} "
+          f"num_reqs {tabela['num_reqs']} "
+          f"total_sum {tabela['total_sum']}")
+
+
+# Requisicao recebida em duplicidade: reexibe a ultima mensagem do cliente
+# "AAAA-MM-DD HH:MM:SS client <ip> DUP!! id_req <id> value <n> num_reqs <g> total_sum <s>"
+def imprimir_duplicada(addr, id_req, numero, num_reqs, total_sum):
+    print(f"{_agora()} "
+          f"client {addr[0]} "
+          f"DUP!! "
+          f"id_req {id_req} "
+          f"value {numero} "
+          f"num_reqs {num_reqs} "
+          f"total_sum {total_sum}")
+
+
+# Requisicao nova processada:
+# "AAAA-MM-DD HH:MM:SS client <ip> id_req <id> value <n> num_reqs <g> total_sum <s>"
+def imprimir_requisicao(addr, id_req, numero, num_reqs, total_sum):
+    print(f"{_agora()} "
+          f"client {addr[0]} "
+          f"id_req {id_req} "
+          f"value {numero} "
+          f"num_reqs {num_reqs} "
+          f"total_sum {total_sum}")
+
+
+# Monta o ACK enviado ao cliente. Inclui o agregado global parcial.
+# Formato: "id_req <id> value <n> num_reqs <g> total_sum <s>"
+def retorno_requisicao(id_req, numero, num_reqs, total_sum):
+    return (f"id_req {id_req} "
+            f"value {numero} "
+            f"num_reqs {num_reqs} "
+            f"total_sum {total_sum}")
