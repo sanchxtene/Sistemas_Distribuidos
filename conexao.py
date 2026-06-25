@@ -13,6 +13,11 @@ BROADCAST_IP = '255.255.255.255'
 RETRY_TIMEOUT = 0.010
 DISCOVERY_TIMEOUT = 1.0
 DISCOVERY_TENTATIVAS = 3
+# Apos este numero de retransmissoes sem ACK, forca rediscovery do lider.
+# 100 * 10ms = ~1s, suficiente para distinguir perda pontual de queda de lider.
+RETRIES_BEFORE_REDISCOVER = 100
+# Timeout de polling da thread de recepcao, para detectar rediscovery pendente.
+RECV_POLL_TIMEOUT = 0.5
 
 # Estado compartilhado entre as threads do cliente.
 running = True
@@ -26,6 +31,11 @@ _ack_lock = threading.Lock()
 _ack_event = threading.Event()
 _ack_em_voo = None        # id_req aguardando confirmacao
 _ultimo_confirmado = 0    # maior id confirmado pelo servidor
+
+# Sinalizado pelo emissor quando suspeita que o lider caiu (varias
+# retransmissoes sem ACK). A thread de recepcao trata, pois ela detem a
+# leitura do socket.
+_needs_rediscovery = threading.Event()
 
 
 def _destino():
@@ -97,8 +107,15 @@ def enviar_com_timeout(sock, req_id, numero):
             _ack_em_voo = None
             return True
 
+    retries = 0
     while running:
-        sock.sendto(mensagem, _destino())
+        try:
+            sock.sendto(mensagem, _destino())
+        except OSError:
+            # Em Windows, sendto para um destino morto pode lancar
+            # ConnectionResetError apos ICMP unreachable. Ignora e marca
+            # rediscovery para nao matar a thread principal.
+            _needs_rediscovery.set()
 
         # Acorda por confirmacao OU por sinal de lacuna; em ambos os casos
         # checamos se ESTE id ja foi confirmado. Lacuna -> reenvia.
@@ -110,7 +127,14 @@ def enviar_com_timeout(sock, req_id, numero):
             with _ack_lock:
                 _ack_em_voo = None
             return True
-        # nao confirmado (timeout ou lacuna): reenvia
+
+        # Apos varias retransmissoes sem ACK, o lider provavelmente caiu sem
+        # gerar ICMP local (cenario comum quando o servidor estava em outra
+        # maquina). Sinaliza para a thread de recepcao redescobrir o lider.
+        retries += 1
+        if retries >= RETRIES_BEFORE_REDISCOVER:
+            retries = 0
+            _needs_rediscovery.set()
 
     return False
 
@@ -126,6 +150,9 @@ def receive_thread(sock, client_socket, porta_descoberta):
 
     while running:
         try:
+            # Polling curto para conseguir tratar pedidos de rediscovery
+            # vindos do emissor mesmo quando o lider parou de responder.
+            sock.settimeout(RECV_POLL_TIMEOUT)
             data, server = sock.recvfrom(1024)
             partes = data.decode().split()
 
@@ -156,12 +183,23 @@ def receive_thread(sock, client_socket, porta_descoberta):
                 continue
 
         except socket.timeout:
+            # Janela para tratar rediscovery sinalizado pelo emissor.
+            if _needs_rediscovery.is_set():
+                _needs_rediscovery.clear()
+                novo = reconectar(client_socket, porta_descoberta)
+                if novo:
+                    with leader_lock:
+                        SERVER_IP, SERVER_PORT = novo
+                    # Acorda o emissor para reenviar imediatamente ao novo lider.
+                    _ack_event.set()
             continue
         except ConnectionResetError:
+            _needs_rediscovery.clear()
             novo = reconectar(client_socket, porta_descoberta)
             if novo:
                 with leader_lock:
                     SERVER_IP, SERVER_PORT = novo
+                _ack_event.set()
             continue
         except Exception:
             if running:
